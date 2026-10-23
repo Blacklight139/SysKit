@@ -1,0 +1,6 @@
+id=syskit
+name=SysKit 系统工具箱 (System App)
+version=v1.0.0
+versionCode=1
+author=SysKit
+description=将 SysKit 系统工具箱安装为系统特权应用（/system/priv-app + WRITE_SECURE_SETTINGS 白名单）。功能：ADB 开关与固化、开发者选项入口、禁用应用商店卸载能力（需在 Magisk 中授权）。

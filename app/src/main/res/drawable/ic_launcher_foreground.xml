@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 终端窗口 + ">_" 图形，居中于安全区 -->
+    <group
+        android:scaleX="0.62"
+        android:scaleY="0.62"
+        android:pivotX="54"
+        android:pivotY="54">
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#7FE8D8"
+            android:strokeWidth="5"
+            android:pathData="M30,32 L78,32 A7,7 0 0 1 85,39 L85,69 A7,7 0 0 1 78,76 L30,76 A7,7 0 0 1 23,69 L23,39 A7,7 0 0 1 30,32 Z" />
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#7FE8D8"
+            android:strokeWidth="5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M35,45 L45,54 L35,63" />
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#7FE8D8"
+            android:strokeWidth="5"
+            android:strokeLineCap="round"
+            android:pathData="M51,63 L66,63" />
+        <!-- 右上角小盾牌：防护含义 -->
+        <path
+            android:fillColor="#FFD166"
+            android:pathData="M74,26 L82,29 L82,36 C82,41 78.5,44.5 74,46 C69.5,44.5 66,41 66,36 L66,29 Z" />
+    </group>
+</vector>

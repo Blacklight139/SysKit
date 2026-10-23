@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系统特权应用权限白名单（Android 8+ 强制要求）：
+  缺失该文件时，特权应用申请 signature|privileged 权限会导致启动告警，
+  在 ro.control_privapp_permissions=enforce 的设备上甚至无法开机。
+-->
+<permissions>
+    <privapp-permissions package="com.syskit.tools">
+        <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
+    </privapp-permissions>
+</permissions>

@@ -1,0 +1,12 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.cxx/
+# 签名密钥不入库（由 tools/build_all.sh 自动生成）
+syskit-release.jks
+# 打包产物
+dist/
+module/system/priv-app/
