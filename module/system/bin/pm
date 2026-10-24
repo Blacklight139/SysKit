@@ -1,0 +1,91 @@
+#!/system/bin/sh
+# SysKit 卸载守卫 —— pm 命令包装器（由 Magisk 模块挂载到 /system/bin/pm）
+#
+# 所有卸载必须经 SysKit 确认：亮屏弹窗询问，熄屏自动拦截。
+#   - 仅拦截 uninstall / uninstall-existing 子命令；其余子命令零改动透传
+#   - 守卫未开启（guard_state != 1）时，卸载命令也直接透传
+#   - 拦截：写 req 文件 → 拉起 SysKit 确认对话框 → 轮询 resp
+#     ALLOW → 放行执行原命令；DENY / 超时（SYSKIT_TIMEOUT_SECS，默认30s）→ 拒绝退出 1
+#     App 无响应（未装/被卸载/会话丢失）超时视为拒绝（fail-closed）
+#
+# 环境变量 SYSKIT_DIR / SYSKIT_TIMEOUT_SECS / SYSKIT_PM_CMD 仅用于主机端测试。
+# 说明：adb 级用户本就可直接执行任意命令，环境变量覆盖不构成额外提权面。
+
+SYSKIT_DIR=${SYSKIT_DIR:-/data/local/tmp/syskit}
+SYSKIT_TIMEOUT_SECS=${SYSKIT_TIMEOUT_SECS:-30}
+
+run_original() {
+  if [ -n "${SYSKIT_PM_CMD:-}" ]; then
+    exec ${SYSKIT_PM_CMD} "$@"
+  fi
+  CLASSPATH=/system/framework/framework.jar
+  export CLASSPATH
+  exec app_process /system/bin com.android.commands.pm.Pm "$@"
+}
+
+# 快速路径：非卸载子命令直接透传
+case "$1" in
+  uninstall|uninstall-existing) ;;
+  *) run_original "$@" ;;
+esac
+
+# 守卫未开启：透传
+if [ "$(cat "$SYSKIT_DIR/guard_state" 2>/dev/null)" != "1" ]; then
+  run_original "$@"
+fi
+
+# 解析目标包名（跳过 --user / --volume 的取值参数）
+SUBCMD="$1"
+shift
+PKG=""
+SKIPVAL=0
+for a in "$@"; do
+  if [ "$SKIPVAL" = "1" ]; then
+    SKIPVAL=0
+    continue
+  fi
+  case "$a" in
+    --user|--volume) SKIPVAL=1 ;;
+    -*) ;;
+    *) PKG="$a" ;;
+  esac
+done
+
+# 无法解析出合法包名 → 透传（由原生 pm 自行校验报错）
+case "$PKG" in
+  ""|*[!a-zA-Z0-9._]*) run_original "$SUBCMD" "$@" ;;
+esac
+
+ID="$$_$(date +%s)"
+REQ="$SYSKIT_DIR/req_$ID"
+RESP="$SYSKIT_DIR/resp_$ID"
+
+# 写请求文件（失败说明守卫目录异常 → 拒绝执行，fail-closed）
+if ! printf '%s' "$PKG" > "$REQ" 2>/dev/null; then
+  echo "SysKit 卸载守卫：无法写入请求（$SYSKIT_DIR 不可写）"
+  exit 1
+fi
+
+# 拉起 SysKit 确认对话框（熄屏时 App 会立即自动拒绝）
+am start --user 0 -n com.syskit.tools/.ui.ConsentDialogActivity \
+  --es mode ask --es pkg "$PKG" --es id "$ID" >/dev/null 2>&1
+
+VERDICT="DENY"
+i=0
+while [ "$i" -lt $((SYSKIT_TIMEOUT_SECS * 2)) ]; do
+  if [ -f "$RESP" ]; then
+    VERDICT="$(cat "$RESP" 2>/dev/null)"
+    rm -f "$RESP" 2>/dev/null
+    break
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+rm -f "$REQ" 2>/dev/null
+
+if [ "$VERDICT" = "ALLOW" ]; then
+  run_original "$SUBCMD" "$@"
+fi
+
+echo "SysKit 卸载守卫：已拒绝卸载 [$PKG]（熄屏自动拦截/未响应/用户拒绝）"
+exit 1
