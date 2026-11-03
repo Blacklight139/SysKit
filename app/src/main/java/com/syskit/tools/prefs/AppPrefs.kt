@@ -24,6 +24,11 @@ class AppPrefs(context: Context) {
         get() = sp.getBoolean(K_STORE_GUARD, false)
         set(v) = sp.edit().putBoolean(K_STORE_GUARD, v).apply()
 
+    /** 卸载守卫：所有卸载须经确认（亮屏弹窗 / 熄屏自动拦截 + 开机自启看板狗） */
+    var uninstallGuard: Boolean
+        get() = sp.getBoolean(K_UNINSTALL_GUARD, false)
+        set(v) = sp.edit().putBoolean(K_UNINSTALL_GUARD, v).apply()
+
     /** 无线 ADB（TCP 5555） */
     var tcpAdb: Boolean
         get() = sp.getBoolean(K_TCP_ADB, false)
@@ -38,6 +43,7 @@ class AppPrefs(context: Context) {
         const val K_ADB_LOCK = "adb_lock"
         const val K_DEV_OPTIONS = "dev_options"
         const val K_STORE_GUARD = "store_guard"
+        const val K_UNINSTALL_GUARD = "uninstall_guard"
         const val K_TCP_ADB = "tcp_adb"
         const val K_CUSTOM_STORES = "custom_stores"
     }

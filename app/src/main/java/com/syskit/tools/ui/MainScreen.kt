@@ -86,6 +86,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             item { BasicCard(state, vm, ctx) }
             item { RootCard(state, vm, ctx) }
             item { StoreGuardCard(state, vm) }
+            item { UninstallGuardCard(state, vm) }
             item { LogsCard(logs, vm) }
             item { FooterCard(ctx) }
         }
@@ -107,7 +108,7 @@ private fun HeaderCard(state: UiState) {
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                "ADB 管理 · Root 提权 · 商店卸载守卫",
+                "ADB 管理 · Root 提权 · 商店卸载守卫 · 卸载确认拦截",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -334,6 +335,29 @@ private fun StoreRow(item: StoreUi, hasRoot: Boolean, vm: MainViewModel) {
     }
 }
 
+// ---------------- 卸载守卫 ----------------
+
+@Composable
+private fun UninstallGuardCard(state: UiState, vm: MainViewModel) {
+    SectionCard("卸载守卫（所有卸载须经同意）") {
+        ToggleRow(
+            title = "卸载确认拦截",
+            subtitle = "亮屏：弹窗询问后放行/拒绝；熄屏：自动拦截（拒绝请求/自动恢复）。" +
+                "adb/shell 卸载由 pm 包装器事前拦截；绕过 pm 的静默卸载由看板狗自动恢复" +
+                "（系统应用 install-existing，第三方从 APK 备份重装）",
+            checked = state.uninstallGuardPref,
+            enabled = state.rootOk,
+            onChange = vm::toggleUninstallGuard
+        )
+        Text(
+            "需刷入 Magisk 模块（含 /system/bin/pm 包装器）并授权 Root；确认框 30 秒无响应按拒绝/自动恢复处理；" +
+                "绕过包装器的 adb 直连命令（cmd package）由看板狗事后恢复兜底",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 // ---------------- 日志 ----------------
 
 @Composable
@@ -380,7 +404,7 @@ private fun FooterCard(ctx: Context) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "SysKit v1.0.0 · minSdk 26 (Android 8.0)",
+            "SysKit v1.1.0 · minSdk 26 (Android 8.0)",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

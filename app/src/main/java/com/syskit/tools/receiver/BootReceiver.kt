@@ -7,8 +7,10 @@ import com.syskit.tools.log.OpsLog
 import com.syskit.tools.ops.DeviceOwnerOps
 import com.syskit.tools.ops.StoreGuard
 import com.syskit.tools.ops.SystemOps
+import com.syskit.tools.ops.UninstallGuard
 import com.syskit.tools.prefs.AppPrefs
 import com.syskit.tools.root.SuSession
+import com.syskit.tools.service.UninstallGuardService
 
 /**
  * 开机 watchdog：重新应用所有持久化配置。
@@ -22,7 +24,12 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val prefs = AppPrefs(context)
-        if (!prefs.adbLock && !prefs.devOptions && !prefs.storeGuard) return
+        if (!prefs.adbLock && !prefs.devOptions && !prefs.storeGuard && !prefs.uninstallGuard) return
+
+        // 卸载守卫：开机即启动看板狗（无需 root；root 会话由服务自行静默获取）
+        if (prefs.uninstallGuard) {
+            runCatching { UninstallGuardService.start(context) }
+        }
 
         val pending = goAsync()
         Thread {
@@ -57,6 +64,11 @@ class BootReceiver : BroadcastReceiver() {
                                     if (StoreGuard.guarded(results)) "已重应用" else "重应用失败"
                             )
                         }
+                    }
+                    if (prefs.uninstallGuard) {
+                        UninstallGuard.ensureDirs(su)
+                        UninstallGuard.setGuardState(su, true)
+                        OpsLog.log("开机：卸载守卫状态文件已重应用（pm 包装器恢复拦截）")
                     }
                 } else {
                     OpsLog.log("开机：无可用 root（未记住授权？），部分配置未重应用")

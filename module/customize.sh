@@ -13,9 +13,12 @@ fi
 # 权限修正：APK 与白名单均为 0644 root:root
 set_perm "$MODPATH/system/priv-app/SysKit/SysKit.apk" 0 0 0644
 set_perm "$MODPATH/system/etc/permissions/privapp-permissions-com.syskit.tools.xml" 0 0 0644
+# 卸载守卫 pm 包装器：0755 可执行
+set_perm "$MODPATH/system/bin/pm" 0 0 0755
 
 ui_print "- 挂载 /system/priv-app/SysKit/SysKit.apk"
 ui_print "- 挂载 /system/etc/permissions/privapp-permissions-com.syskit.tools.xml"
+ui_print "- 挂载 /system/bin/pm（卸载守卫拦截器：亮屏弹窗确认 / 熄屏自动拦截）"
 ui_print "- 重启后生效；首次启动请到 Magisk 为 SysKit 授予 Root 权限"
 ui_print "- 建议：Magisk 超级用户中将 SysKit 设为自动授权，"
 ui_print "  以便开机 watchdog 静默重应用『固化 ADB / 商店守卫』"

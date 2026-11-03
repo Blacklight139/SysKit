@@ -7,6 +7,12 @@ cd "$(dirname "$0")/.."
 ADB=${ADB:-adb}
 PKG=com.syskit.tools
 
+echo "[*] 主机端：JVM 单元测试"
+./gradlew -q testDebugUnitTest
+
+echo "[*] 主机端：pm 包装器行为测试"
+bash tools/test_pm_wrapper.sh
+
 SERIAL=$($ADB devices | awk 'NR>1 && /device[[:space:]]*$/{print $1; exit}')
 [ -n "$SERIAL" ] || { echo "未找到 adb 设备"; exit 1; }
 echo "[*] 使用设备：$SERIAL"

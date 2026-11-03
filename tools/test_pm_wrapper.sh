@@ -85,10 +85,27 @@ rm -f "$WORK/syskit"/req_* "$WORK/syskit"/resp_*
 out=$(run_pm 1 uninstall com.example 2>&1)
 check "超时自动拒绝" "已拒绝卸载" "$out"
 
-echo "[7/9] 守卫目录不可写：fail-closed"
-rm -rf "$WORK/syskit"
-out=$(run_pm 1 uninstall com.example 2>&1)
-check "目录缺失拒绝执行" "无法写入请求" "$out"
+echo "[7/9] 守卫显式关闭（guard_state=0）→ 透传"
+mkdir -p "$WORK/syskit"
+echo 0 > "$WORK/syskit/guard_state"
+out=$(run_pm 10 uninstall com.example 2>&1)
+check "guard_state=0 → 透传" "STUB_ARGS:uninstall com.example" "$out"
+
+echo "[7b] 守卫开启但请求写入失败（fail-closed）"
+echo 1 > "$WORK/syskit/guard_state"
+rm -f "$WORK/pid" "$WORK/out7"
+SYSKIT_DIR="$WORK/syskit" SYSKIT_PM_CMD="$STUB" SYSKIT_TIMEOUT_SECS=1 \
+  sh -c 'echo $$ > "$0"; sleep 1.5; exec sh "$1" uninstall com.example' "$WORK/pid" "$WRAPPER" > "$WORK/out7" 2>&1 &
+for i in $(seq 1 20); do [ -s "$WORK/pid" ] && break; sleep 0.1; done
+WPID=$(cat "$WORK/pid" 2>/dev/null)
+T0=$(date +%s)
+# 预判包装器将生成的 req 文件名（$$ + epoch）并以同名目录阻断写入
+for t in $((T0 - 1)) $T0 $((T0 + 1)) $((T0 + 2)) $((T0 + 3)); do
+  mkdir "$WORK/syskit/req_${WPID}_$t" 2>/dev/null
+done
+wait
+check "req 写入失败拒绝执行" "无法写入请求" "$(cat "$WORK/out7")"
+rm -rf "$WORK/syskit"/req_*
 
 echo "[8/9] uninstall-existing 同样被拦截"
 mkdir -p "$WORK/syskit"

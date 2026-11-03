@@ -1,6 +1,6 @@
 # SysKit 系统工具箱
 
-面向系统部署的 Android 设备管理工具：**基础版**通过系统应用权限开关 ADB；**高级版**通过 Magisk 提权实现「获得 Root 后立即禁用应用商店卸载能力」「固化 ADB（永久开启）」「开启开发者选项」。
+面向系统部署的 Android 设备管理工具：**基础版**通过系统应用权限开关 ADB；**高级版**通过 Magisk 提权实现「获得 Root 后立即禁用应用商店卸载能力」「固化 ADB（永久开启）」「开启开发者选项」；v1.1.0 新增**卸载守卫**——所有卸载流程须经同意（亮屏弹窗询问、熄屏自动拦截）。
 
 ## 需求实现对照
 
@@ -11,6 +11,7 @@
 | 获得 Root 后立即禁用系统应用商店卸载能力 | Root 授权成功瞬间自动吊销商店的 `REQUEST_DELETE_PACKAGES` / `DELETE_PACKAGES` 并 `appops deny`（分层冗余），开机 watchdog 重应用 |
 | 选项：开启开发者选项（设置入口） | `development_settings_enabled=1`，设置 → 系统 → 开发者选项；带侧栏（抽屉式设置，如平板/部分 ROM）的设备会同步出现入口，应用内亦提供直达按钮 |
 | 选项：固化 ADB（永久开启） | 三重保障：`adb_enabled=1` + `persist.sys.usb.config` 合并 `adb`（插线即连）+ 开机 `BOOT_COMPLETED` 自动重应用；可选无线 ADB（TCP 5555） |
+| 所有卸载流程须经同意（亮屏弹窗询问 / 熄屏自动拦截） | **卸载守卫三层**：① Magisk 模块替换 `/system/bin/pm`，事前拦截 `pm uninstall`（文件协议 + 同意对话框，30s 无响应拒绝）② 看板狗前台服务监听 `PACKAGE_REMOVED`：熄屏自动恢复、亮屏弹「保持卸载/恢复」③ `/data/app` APK 预备份，新装包自动补备份 |
 
 ## 权限分层模型
 
@@ -83,6 +84,9 @@ adb shell pm grant com.syskit.tools android.permission.WRITE_SECURE_SETTINGS
 | 商店守卫 | `pm revoke <商店> android.permission.REQUEST_DELETE_PACKAGES`<br>`pm revoke <商店> android.permission.DELETE_PACKAGES`<br>`appops set <商店> REQUEST_DELETE_PACKAGES deny`<br>`appops set <商店> DELETE_PACKAGES deny` |
 | 商店恢复 | `pm grant ... REQUEST_DELETE_PACKAGES` + `appops reset <商店>` |
 | 设备所有者（增强） | `dpm set-device-owner com.syskit.tools/.admin.AdminReceiver` → `setUninstallBlocked` |
+| 卸载守卫 · pm 包装器 | 替换 `/system/bin/pm`：拦截 `uninstall` / `uninstall-existing`，经 `/data/local/tmp/syskit` 文件协议询问 App；`ALLOW` 放行、`DENY`/超时拒绝（fail-closed） |
+| 卸载守卫 · 看板狗 | `PACKAGE_REMOVED` → 熄屏：`pm install-existing` 或备份 `pm install-multiple -r` 立即恢复；亮屏：弹窗询问（30s 无响应自动恢复） |
+| 卸载守卫 · 备份 | `pm path <pkg>` → `cp` 至 `/data/local/tmp/syskit/backups/<pkg>/`；启用时全量、新装包自动增量 |
 
 内置识别的商店：Google Play、小米、华为、荣耀、OPPO、vivo、应用宝、百度、360、豌豆荚、魅族、联想、三星；支持添加任意自定义包名。
 
@@ -105,8 +109,11 @@ adb shell pm grant com.syskit.tools android.permission.WRITE_SECURE_SETTINGS
 ## 测试
 
 ```bash
-# 单元测试（12 项：USB 配置合并、商店守卫命令构建与判定）
+# 单元测试（卸载守卫纯逻辑：校验/决策/过滤/恢复计划/文件协议）
 ./gradlew test
+
+# pm 包装器主机端行为测试（无需设备：透传/拦截/ALLOW/DENY/超时/fail-closed）
+bash tools/test_pm_wrapper.sh
 
 # 设备/模拟器完整验证（需已连接 adb 设备，google_apis 镜像可验证 root 命令）
 tools/run_tests.sh
@@ -137,6 +144,15 @@ appops deny、persist.sys.usb.config）。
 **Q：为什么 `pm revoke DELETE_PACKAGES` 显示失败？**
 该权限为签名级，部分系统不允许 revoke，属预期内；守卫判定不依赖这一条。
 
+**Q：卸载守卫能拦截哪些卸载？拦不住哪些？**
+可事前拦截：`adb shell pm uninstall`、su 脚本里的 pm 卸载（经包装器）。无法事前暂停的（设置页用户手动卸载、binder 层静默卸载、`cmd package` 直连）由看板狗事后确认/自动恢复兜底；第三方应用恢复自 APK 备份（全新数据，除非卸载者用了 `-k`），系统应用经 `install-existing` 原样恢复。确认框 30 秒无响应：ask 按拒绝、removed 按自动恢复。
+
+**Q：卸载守卫为什么需要 Magisk 模块？**
+事前拦截依赖模块挂载的 `/system/bin/pm` 包装器；仅装 APK（无模块）时守卫自动退化为「事后恢复」模式（备份目录与状态文件仍由 root 会话维护）。
+
+**Q：想卸载 SysKit 自己怎么办？**
+先在应用内关闭「卸载确认拦截」开关（guard_state 置 0），否则 adb 卸载会被包装器拒绝（fail-closed）；守卫关闭后即可正常卸载。
+
 ## 项目结构
 
 ```
@@ -145,13 +161,15 @@ app/src/main/java/com/syskit/tools/
 ├── root/SuSession.kt          # 常驻 su 会话（marker 回显收码）
 ├── ops/SystemOps.kt           # ADB / 开发者选项 / 固化（命令构建纯函数可测）
 ├── ops/StoreGuard.kt          # 应用商店卸载守卫（分层冗余）
+├── ops/UninstallGuard.kt      # 卸载守卫核心（校验/决策/文件协议/备份恢复，纯逻辑可测）
 ├── ops/DeviceOwnerOps.kt      # 设备所有者增强
 ├── admin/AdminReceiver.kt     # DeviceAdminReceiver
 ├── receiver/BootReceiver.kt   # 开机 watchdog
+├── service/UninstallGuardService.kt  # 看板狗前台服务（轮询包装器 + REMOVED 确认/恢复 + 备份）
 ├── prefs/AppPrefs.kt          # 持久配置
 ├── log/OpsLog.kt              # 操作日志
 ├── vm/MainViewModel.kt        # 状态与业务编排
-└── ui/                        # Compose 界面
-module/                        # Magisk 模块（priv-app + 白名单）
-tools/                         # 构建 / 系统部署脚本
+└── ui/                        # Compose 界面（含 ConsentDialogActivity 卸载同意对话框）
+module/                        # Magisk 模块（priv-app + 白名单 + system/bin/pm 包装器）
+tools/                         # 构建 / 系统部署 / 测试脚本（test_pm_wrapper.sh 为主机端包装器行为测试）
 ```

@@ -7,8 +7,10 @@ import com.syskit.tools.log.OpsLog
 import com.syskit.tools.ops.DeviceOwnerOps
 import com.syskit.tools.ops.StoreGuard
 import com.syskit.tools.ops.SystemOps
+import com.syskit.tools.ops.UninstallGuard
 import com.syskit.tools.prefs.AppPrefs
 import com.syskit.tools.root.SuSession
+import com.syskit.tools.service.UninstallGuardService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +41,7 @@ data class UiState(
     val devOptionsPref: Boolean = false,
     val storeGuardPref: Boolean = false,
     val tcpAdbPref: Boolean = false,
+    val uninstallGuardPref: Boolean = false,
     // 商店
     val stores: List<StoreUi> = emptyList(),
     val toast: String? = null,
@@ -94,6 +97,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     devOptionsPref = prefs.devOptions,
                     storeGuardPref = prefs.storeGuard,
                     tcpAdbPref = prefs.tcpAdb,
+                    uninstallGuardPref = prefs.uninstallGuard,
                     stores = stores,
                 )
             }
@@ -150,6 +154,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (prefs.storeGuard) {
                 OpsLog.log("已获取 Root 且商店守卫开启 → 立即禁用应用商店卸载能力")
                 applyStoreGuardInternal()
+            }
+            if (prefs.uninstallGuard) {
+                val ctx = getApplication<Application>()
+                UninstallGuard.ensureDirs(s)
+                UninstallGuard.setGuardState(s, true)
+                UninstallGuard.grantSaw(s, ctx.packageName)
+                UninstallGuardService.start(ctx)
+                OpsLog.log("已获取 Root 且卸载守卫开启 → 看板狗已激活")
             }
             refresh()
         }
@@ -350,6 +362,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             prefs.customStores = prefs.customStores - pkg
             OpsLog.log("已移除自定义守卫目标：$pkg")
+            refresh()
+        }
+    }
+
+    // ---------- 卸载守卫 ----------
+
+    /** 开启需 Root（文件协议 + 备份/恢复均经 root 会话）；关闭即时生效 */
+    fun toggleUninstallGuard(on: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            if (!on) {
+                val s = suOrAcquire(15_000)
+                if (s != null) UninstallGuard.setGuardState(s, false)
+                prefs.uninstallGuard = false
+                UninstallGuardService.stop(ctx)
+                OpsLog.log("卸载守卫：已停用（shell 卸载恢复直通；已有备份保留在 ${UninstallGuard.BACKUP_DIR}）")
+                _state.update { it.copy(toast = "卸载守卫已停用") }
+                refresh()
+                return@launch
+            }
+            _state.update { it.copy(busy = "正在启用卸载守卫…") }
+            val s = suOrAcquire(30_000)
+            if (s == null) {
+                _state.update { it.copy(busy = null, toast = "卸载守卫需要 Root 权限") }
+                refresh()
+                return@launch
+            }
+            val ready = UninstallGuard.ensureDirs(s) && UninstallGuard.setGuardState(s, true)
+            UninstallGuard.grantSaw(s, ctx.packageName)
+            if (!ready) {
+                OpsLog.log("卸载守卫：守卫目录初始化失败（详见日志）")
+                _state.update { it.copy(busy = null, toast = "启用失败，详见日志") }
+                refresh()
+                return@launch
+            }
+            prefs.uninstallGuard = true
+            UninstallGuardService.start(ctx)
+            OpsLog.log("卸载守卫：已启用（亮屏弹窗确认 / 熄屏自动拦截；看板狗启动后将全量备份 /data/app APK）")
+            _state.update { it.copy(busy = null, toast = "卸载守卫已启用") }
             refresh()
         }
     }

@@ -21,6 +21,12 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- 卸载守卫：前台看板狗 + 亮屏弹窗拉起 + 拦截通知 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -48,6 +54,24 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- 卸载同意对话框：由 pm 包装器（shell am start）与看板狗服务拉起 -->
+        <activity
+            android:name=".ui.ConsentDialogActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.SysKit.Dialog" />
+
+        <!-- 卸载守卫看板狗：轮询包装器请求 + REMOVED 事件确认/恢复 + APK 备份 -->
+        <service
+            android:name=".service.UninstallGuardService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="uninstall-consent-watchdog" />
+        </service>
 
         <!-- 设备所有者（可选增强：彻底封死应用卸载） -->
         <receiver

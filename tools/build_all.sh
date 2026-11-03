@@ -31,6 +31,7 @@ sed -i "s/^versionCode=.*/versionCode=${VERSION_CODE}/" module/module.prop
 MODDIR=module/system/priv-app/SysKit
 mkdir -p "$MODDIR"
 cp "dist/SysKit-v${VERSION}.apk" "$MODDIR/SysKit.apk"
+chmod 755 module/system/bin/pm   # 卸载守卫包装器须可执行（python 打包分支按此位写入）
 
 OUT="dist/SysKit-MagiskModule-v${VERSION}.zip"
 rm -f "$OUT"
@@ -44,7 +45,13 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
     for root, _, files in os.walk("module"):
         for f in files:
             p = os.path.join(root, f)
-            z.write(p, os.path.relpath(p, "module"))
+            arc = os.path.relpath(p, "module")
+            mode = 0o755 if arc == "system/bin/pm" else 0o644
+            with open(p, "rb") as fh:
+                zi = zipfile.ZipInfo(arc)
+                zi.external_attr = (0o100000 | mode) << 16   # 保留 unix 权限位
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                z.writestr(zi, fh.read())
 PY
 fi
 rm -f "$MODDIR/SysKit.apk"
