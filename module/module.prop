@@ -1,6 +1,6 @@
 id=syskit
 name=SysKit 系统工具箱 (System App)
-version=v1.1.0
-versionCode=2
+version=v1.2.0
+versionCode=3
 author=SysKit
-description=将 SysKit 系统工具箱安装为系统特权应用（/system/priv-app + pm 卸载守卫包装器 + WRITE_SECURE_SETTINGS 白名单）。功能：ADB 开关与固化、开发者选项入口、禁用应用商店卸载能力、卸载守卫（所有卸载须经确认：亮屏弹窗询问、熄屏自动拦截）。
+description=将 SysKit 系统工具箱安装为系统特权应用（/system/priv-app + pm 卸载管控包装器 + INSTALL_PACKAGES/WRITE_SECURE_SETTINGS 白名单）。功能：ADB 开关与固化、开发者选项入口、卸载管控（禁止系统卸载 / 接管系统卸载：单次弹窗确认、批量与频繁自动禁止并独立记录）、APK 安装器、内嵌 Magisk 引导。

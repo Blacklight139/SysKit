@@ -15,6 +15,24 @@ if [ ! -f "$KEYSTORE" ]; then
     -dname "CN=SysKit, OU=Tools, O=SysKit, L=Local, ST=Local, C=CN" >/dev/null 2>&1
 fi
 
+# 1.5) 内嵌 Magisk（锁定版本 + SHA256 校验；SYSKIT_SKIP_MAGISK=1 可跳过，APK 内入口将显示“未内嵌”）
+MAGISK_VER=v31.1
+MAGISK_SHA256=89cefac0a318afa39fb3880c45c87b036c05bc1ebf02a7a715b7f8d7c26ac6e7
+MAGISK_ASSET=app/src/main/assets/magisk/Magisk.apk
+if [ "${SYSKIT_SKIP_MAGISK:-0}" = "1" ]; then
+  rm -f "$MAGISK_ASSET"
+  echo "[*] 按要求跳过内嵌 Magisk"
+else
+  mkdir -p "$(dirname "$MAGISK_ASSET")"
+  if [ ! -f "$MAGISK_ASSET" ] || [ "$(sha256sum "$MAGISK_ASSET" | cut -d' ' -f1)" != "$MAGISK_SHA256" ]; then
+    echo "[*] 下载内嵌 Magisk $MAGISK_VER（约 10MB）"
+    curl -sL --connect-timeout 15 -o "$MAGISK_ASSET" \
+      "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK_VER}/Magisk-${MAGISK_VER}.apk"
+  fi
+  echo "$MAGISK_SHA256  $MAGISK_ASSET" | sha256sum -c - >/dev/null \
+    || { echo "内嵌 Magisk SHA256 校验失败"; exit 1; }
+fi
+
 # 2) 构建
 echo "[*] Gradle assembleRelease（v$VERSION / build $VERSION_CODE）"
 ./gradlew --no-daemon assembleRelease

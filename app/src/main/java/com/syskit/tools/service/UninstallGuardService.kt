@@ -14,8 +14,12 @@ import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import com.syskit.tools.MainActivity
 import com.syskit.tools.R
+import com.syskit.tools.log.GuardEventLog
 import com.syskit.tools.log.OpsLog
+import com.syskit.tools.ops.RateLimiter
+import com.syskit.tools.ops.UninstallControl
 import com.syskit.tools.ops.UninstallGuard
+import com.syskit.tools.prefs.AppPrefs
 import com.syskit.tools.root.SuSession
 import com.syskit.tools.ui.ConsentDialogActivity
 import kotlinx.coroutines.CoroutineScope
@@ -28,10 +32,11 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 卸载守卫看板狗（前台服务，specialUse）。
+ * 卸载管控看板狗（前台服务，specialUse）。
  *
- * - 轮询 pm 包装器请求：熄屏自动拒绝；亮屏由包装器拉起的对话框等待用户
- * - 监听 PACKAGE_REMOVED：熄屏自动恢复；亮屏弹窗询问（30s 默认恢复）
+ * 模式（UninstallControl.modeOf）：BLOCK_ALL=所有卸载一律拒绝；TAKEOVER=单次弹窗、频繁/批量自动禁止。
+ * - 轮询 pm 包装器请求：按模式决策（禁止/熄屏/超频 → 自动拒绝并记入 GuardEventLog；亮屏单次 → 弹窗）
+ * - 监听 PACKAGE_REMOVED：被拒卸载自动恢复（系统应用 install-existing，第三方从备份重装）
  * - 启动后全量备份 /data/app 应用 APK；新装包自动补备份
  */
 class UninstallGuardService : Service() {
@@ -39,10 +44,16 @@ class UninstallGuardService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var receiver: BroadcastReceiver? = null
     private val labels = ConcurrentHashMap<String, String>()
+    private var mode = UninstallControl.Mode.OFF
+    private var rateState = RateLimiter.State()
 
     companion object {
         private const val CHANNEL_ID = "uninstall_guard"
         private const val NOTIF_ID = 42
+
+        /** 限速阈值：60 秒窗口内 ≥3 次卸载尝试后自动禁止（被拒尝试同样计数） */
+        const val RATE_WINDOW_MS = 60_000L
+        const val RATE_MAX = 3
 
         fun start(ctx: Context) {
             ContextCompat.startForegroundService(ctx, Intent(ctx, UninstallGuardService::class.java))
@@ -57,22 +68,44 @@ class UninstallGuardService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        GuardEventLog.init(filesDir)
         startForeground(NOTIF_ID, buildNotification())
         registerPackageReceiver()
-        OpsLog.log("卸载守卫：看板狗已启动")
-        scope.launch {
-            backupAllInstalled()
-            pollLoop()
-        }
+        OpsLog.log("卸载管控：看板狗已启动")
+        scope.launch { initGuard() }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        mode = UninstallControl.modeOf(AppPrefs(this).blockAll, AppPrefs(this).takeover)
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         receiver?.let { runCatching { unregisterReceiver(it) } }
         scope.cancel()
-        OpsLog.log("卸载守卫：看板狗已停止")
+        OpsLog.log("卸载管控：看板狗已停止")
         super.onDestroy()
+    }
+
+    // ---------- 初始化 ----------
+
+    private suspend fun initGuard() {
+        val prefs = AppPrefs(this)
+        mode = UninstallControl.modeOf(prefs.blockAll, prefs.takeover)
+        if (mode == UninstallControl.Mode.OFF) {
+            stopSelf()
+            return
+        }
+        val su = runCatching { SuSession.acquire(20_000) }.getOrNull()
+        if (su == null) {
+            OpsLog.log("卸载管控：暂无 root 会话（Magisk 未记住授权？），guard_state 保持原值")
+            return
+        }
+        val ok = UninstallGuard.ensureDirs(su) && UninstallGuard.setGuardState(su, true)
+        UninstallGuard.grantSaw(su, packageName)
+        OpsLog.log("卸载管控：guard_state 已应用（${if (ok) "成功" else "失败"}），模式=$mode")
+        backupAllInstalled()
+        pollLoop()
     }
 
     // ---------- 轮询 pm 包装器请求 ----------
@@ -82,17 +115,29 @@ class UninstallGuardService : Service() {
             val su = runCatching { SuSession.acquire(timeoutMs = 8_000) }.getOrNull()
             if (su != null) {
                 runCatching {
-                    UninstallGuard.scanRequests(su).forEach { req ->
-                        if (!screenOn()) {
-                            UninstallGuard.respond(su, req.id, req.pkg, allow = false)
-                            OpsLog.log("卸载守卫：熄屏自动拦截卸载请求 [${req.pkg}]")
-                        } else {
-                            OpsLog.log("卸载守卫：卸载请求等待用户确认 [${req.pkg}]（30s 无响应自动拒绝）")
-                        }
-                    }
+                    UninstallGuard.scanRequests(su).forEach { req -> handleRequest(su, req) }
                 }
             }
             delay(1_000)
+        }
+    }
+
+    private fun handleRequest(su: SuSession, req: UninstallGuard.GuardRequest) {
+        val now = System.currentTimeMillis()
+        val rate = RateLimiter.evaluate(rateState, now, RATE_WINDOW_MS, RATE_MAX)
+        rateState = rate.next
+        when (UninstallControl.decide(mode, screenOn(), rate.allowed)) {
+            UninstallControl.Action.DENY -> {
+                UninstallGuard.respond(su, req.id, req.pkg, allow = false)
+                val type = when {
+                    mode == UninstallControl.Mode.BLOCK_ALL -> GuardEventLog.TYPE_BLOCK_ALL
+                    !rate.allowed -> GuardEventLog.TYPE_RATE_LIMIT
+                    else -> GuardEventLog.TYPE_SCREEN_OFF
+                }
+                GuardEventLog.log(type, "已拒绝卸载请求 [${req.pkg}]")
+            }
+            UninstallControl.Action.ASK ->
+                OpsLog.log("卸载管控：卸载请求等待用户确认 [${req.pkg}]（30s 无响应自动拒绝）")
         }
     }
 
@@ -126,23 +171,39 @@ class UninstallGuardService : Service() {
         if (!UninstallGuard.shouldReactTo(pkg, packageName, replacing, UninstallGuard.allowedUntil(pkg), now)) return
         val su = runCatching { SuSession.acquire(8_000) }.getOrNull() ?: return
         val label = appLabel(pkg)
-        if (!screenOn()) {
-            val ok = UninstallGuard.restoreNow(su, pkg)
-            OpsLog.log("卸载守卫：熄屏检测到 [$label] 被卸载 → ${if (ok) "已自动拦截并恢复" else "恢复失败（无可用备份）"}")
-            notifyIntercepted(label, ok)
-        } else {
-            val hasBackup = UninstallGuard.hasBackup(su, pkg)
-            OpsLog.log("卸载守卫：检测到 [$label] 被卸载（备份可用=$hasBackup）→ 弹窗询问")
-            val i = Intent(this, ConsentDialogActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(ConsentDialogActivity.EXTRA_MODE, "removed")
-                putExtra(ConsentDialogActivity.EXTRA_PKG, pkg)
-                putExtra(ConsentDialogActivity.EXTRA_LABEL, label)
-            }
-            if (!runCatching { startActivity(i) }.isSuccess) {
+        val rate = RateLimiter.evaluate(rateState, System.currentTimeMillis(), RATE_WINDOW_MS, RATE_MAX)
+        rateState = rate.next
+        when (UninstallControl.decide(mode, screenOn(), rate.allowed)) {
+            UninstallControl.Action.DENY -> {
                 val ok = UninstallGuard.restoreNow(su, pkg)
-                OpsLog.log("卸载守卫：确认框拉起失败 → ${if (ok) "已自动恢复" else "恢复失败（无可用备份）"}")
+                val type = when {
+                    mode == UninstallControl.Mode.BLOCK_ALL -> GuardEventLog.TYPE_BLOCK_ALL
+                    !rate.allowed -> GuardEventLog.TYPE_RATE_LIMIT
+                    else -> GuardEventLog.TYPE_SCREEN_OFF
+                }
+                GuardEventLog.log(
+                    type,
+                    "[$label] 被卸载 → ${if (ok) "已自动拦截并恢复" else "恢复失败（无可用备份）"}"
+                )
                 notifyIntercepted(label, ok)
+            }
+            UninstallControl.Action.ASK -> {
+                val hasBackup = UninstallGuard.hasBackup(su, pkg)
+                OpsLog.log("卸载管控：检测到 [$label] 被卸载（备份可用=$hasBackup）→ 弹窗询问")
+                val i = Intent(this, ConsentDialogActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    putExtra(ConsentDialogActivity.EXTRA_MODE, "removed")
+                    putExtra(ConsentDialogActivity.EXTRA_PKG, pkg)
+                    putExtra(ConsentDialogActivity.EXTRA_LABEL, label)
+                }
+                if (!runCatching { startActivity(i) }.isSuccess) {
+                    val ok = UninstallGuard.restoreNow(su, pkg)
+                    GuardEventLog.log(
+                        GuardEventLog.TYPE_RESTORED,
+                        "确认框拉起失败 → ${if (ok) "已自动恢复 [$label]" else "恢复失败 [$label]（无可用备份）"}"
+                    )
+                    notifyIntercepted(label, ok)
+                }
             }
         }
     }
@@ -151,7 +212,7 @@ class UninstallGuardService : Service() {
 
     private suspend fun backupAllInstalled() {
         val su = runCatching { SuSession.acquire(20_000) }.getOrNull() ?: run {
-            OpsLog.log("卸载守卫：备份跳过（无可用 root 会话，Magisk 未记住授权？）")
+            OpsLog.log("卸载管控：备份跳过（无可用 root 会话，Magisk 未记住授权？）")
             return
         }
         val targets = packageManager.getInstalledPackages(0)
@@ -160,15 +221,15 @@ class UninstallGuardService : Service() {
             .map { it.packageName }
             .filter { UninstallGuard.validPkg(it) }
         refreshLabels()
-        OpsLog.log("卸载守卫：开始备份 ${targets.size} 个 /data/app 应用的 APK")
+        OpsLog.log("卸载管控：开始备份 ${targets.size} 个 /data/app 应用的 APK")
         var done = 0
         for (p in targets) {
             if (!scope.isActive) return
             UninstallGuard.backupNow(su, p)
             done++
-            if (done % 10 == 0) OpsLog.log("卸载守卫：备份进度 $done/${targets.size}")
+            if (done % 10 == 0) OpsLog.log("卸载管控：备份进度 $done/${targets.size}")
         }
-        OpsLog.log("卸载守卫：备份完成 $done/${targets.size}（目录 ${UninstallGuard.BACKUP_DIR}）")
+        OpsLog.log("卸载管控：备份完成 $done/${targets.size}（目录 ${UninstallGuard.BACKUP_DIR}）")
     }
 
     private fun backupOne(pkg: String) {
@@ -176,7 +237,7 @@ class UninstallGuardService : Service() {
         val ai = runCatching { packageManager.getApplicationInfo(pkg, 0) }.getOrNull() ?: return
         if (ai.sourceDir?.startsWith("/data/app") != true) return
         val su = runCatching { SuSession.acquire(8_000) }.getOrNull() ?: return
-        if (UninstallGuard.backupNow(su, pkg)) OpsLog.log("卸载守卫：已备份新装应用 [$pkg]")
+        if (UninstallGuard.backupNow(su, pkg)) OpsLog.log("卸载管控：已备份新装应用 [$pkg]")
     }
 
     // ---------- 辅助 ----------
@@ -206,8 +267,8 @@ class UninstallGuardService : Service() {
     private fun buildNotification(): Notification {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "卸载守卫", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "卸载守卫运行状态与拦截通知"
+            NotificationChannel(CHANNEL_ID, "卸载管控", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "卸载管控运行状态与拦截通知"
             }
         )
         val pi = PendingIntent.getActivity(
@@ -215,8 +276,8 @@ class UninstallGuardService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("SysKit 卸载守卫运行中")
-            .setContentText("所有卸载须经确认：亮屏弹窗询问 / 熄屏自动拦截")
+            .setContentTitle("SysKit 卸载管控运行中")
+            .setContentText("模式：${if (mode == UninstallControl.Mode.BLOCK_ALL) "禁止系统卸载" else "接管系统卸载"}")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pi)
             .setOngoing(true)
@@ -226,7 +287,7 @@ class UninstallGuardService : Service() {
     private fun notifyIntercepted(label: String, ok: Boolean) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val n = Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("卸载守卫：已自动拦截卸载")
+            .setContentTitle("卸载管控：已自动拦截卸载")
             .setContentText("[$label] ${if (ok) "已自动恢复" else "恢复失败（无可用备份）"}")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setAutoCancel(true)

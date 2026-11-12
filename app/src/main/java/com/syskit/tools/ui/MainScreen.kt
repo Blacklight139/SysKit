@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,7 +28,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -49,10 +50,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.syskit.tools.log.GuardEventLog
 import com.syskit.tools.log.OpsLog
-import com.syskit.tools.ops.StoreGuard
 import com.syskit.tools.vm.MainViewModel
-import com.syskit.tools.vm.StoreUi
+import com.syskit.tools.vm.SuPolicyUi
 import com.syskit.tools.vm.UiState
 
 private val OkGreen = Color(0xFF2E7D32)
@@ -85,8 +86,9 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             item { PrivilegeCard(state) }
             item { BasicCard(state, vm, ctx) }
             item { RootCard(state, vm, ctx) }
-            item { StoreGuardCard(state, vm) }
-            item { UninstallGuardCard(state, vm) }
+            item { UninstallControlCard(state, vm) }
+            item { InstallerCard(state, vm) }
+            item { EmbeddedMagiskCard(state, vm) }
             item { LogsCard(logs, vm) }
             item { FooterCard(ctx) }
         }
@@ -108,7 +110,7 @@ private fun HeaderCard(state: UiState) {
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                "ADB 管理 · Root 提权 · 商店卸载守卫 · 卸载确认拦截",
+                "ADB 管理 · Root 提权 · 卸载管控 · APK 安装器 · 内嵌 Magisk",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -249,112 +251,141 @@ private fun RootCard(state: UiState, vm: MainViewModel, ctx: Context) {
             enabled = state.rootOk,
             onChange = vm::toggleDeviceOwner
         )
-    }
-}
 
-// ---------------- 商店守卫 ----------------
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-@Composable
-private fun StoreGuardCard(state: UiState, vm: MainViewModel) {
-    SectionCard("应用商店卸载守卫（获得 Root 后立即执行）") {
-        ToggleRow(
-            title = "禁用应用商店卸载能力",
-            subtitle = "吊销 REQUEST_DELETE_PACKAGES + appops deny，开机自动重应用；商店升级后如复得权限亦会被重新吊销",
-            checked = state.storeGuardPref,
-            onChange = vm::toggleStoreGuard
-        )
-        if (state.rootOk && state.storeGuardPref) {
-            TextButton(onClick = vm::applyStoreGuardNow) { Text("立即执行") }
-        }
-
-        if (state.stores.isEmpty()) {
-            Text(
-                "未检测到已知应用商店（可添加自定义包名）",
+        Text("Root 授权管理（magisk.db · 实验性）", style = MaterialTheme.typography.titleSmall)
+        when {
+            !state.rootOk -> Text(
+                "获取 Root 后可在此管理其他应用的 su 授权（允许/拒绝/清除）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        } else {
-            state.stores.forEach { item -> StoreRow(item, state.rootOk, vm) }
-        }
-
-        var custom by remember { mutableStateOf("") }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = custom,
-                onValueChange = { custom = it },
-                label = { Text("自定义商店包名") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
+            state.suPolicies.isEmpty() -> Text(
+                "暂无 su 授权记录（其他应用首次请求 root 时生成）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                enabled = custom.contains('.'),
-                onClick = {
-                    vm.addCustomStore(custom.trim())
-                    custom = ""
-                }
-            ) { Text("添加") }
+            else -> state.suPolicies.forEach { p -> SuPolicyRowUi(p, vm) }
         }
     }
 }
 
 @Composable
-private fun StoreRow(item: StoreUi, hasRoot: Boolean, vm: MainViewModel) {
-    val isKnown = StoreGuard.KNOWN_STORES.any { it.first == item.info.pkg }
+private fun SuPolicyRowUi(item: SuPolicyUi, vm: MainViewModel) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(item.info.label, style = MaterialTheme.typography.bodyMedium)
+            Text(item.label, style = MaterialTheme.typography.bodyMedium)
             Text(
-                item.info.pkg,
+                "uid ${item.uid} · " + when (item.policy) {
+                    2 -> "已允许"
+                    0 -> "已拒绝"
+                    else -> "policy=${item.policy}"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                when (item.guarded) {
-                    true -> "● 卸载能力已禁用"
-                    false -> "● 已恢复"
-                    null -> "○ 待执行${if (!hasRoot) "（需 Root）" else ""}"
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = when (item.guarded) {
-                    true -> OkGreen
-                    false -> MaterialTheme.colorScheme.onSurfaceVariant
-                    null -> BadRed
-                }
-            )
         }
-        Column(horizontalAlignment = Alignment.End) {
-            if (hasRoot) {
-                TextButton(onClick = { vm.restoreStore(item.info.pkg) }) { Text("恢复") }
-            }
-            if (!isKnown) {
-                TextButton(onClick = { vm.removeCustomStore(item.info.pkg) }) { Text("移除") }
-            }
+        TextButton(onClick = { vm.setSuPolicy(item.uid, true) }) { Text("允许") }
+        TextButton(onClick = { vm.setSuPolicy(item.uid, false) }) { Text("拒绝") }
+        TextButton(onClick = { vm.clearSuPolicy(item.uid) }) { Text("清除") }
+    }
+}
+
+// ---------------- 卸载管控 ----------------
+
+@Composable
+private fun UninstallControlCard(state: UiState, vm: MainViewModel) {
+    val events by GuardEventLog.lines.collectAsState()
+    SectionCard("卸载管控") {
+        ToggleRow(
+            title = "禁止系统卸载",
+            subtitle = "开启后系统内所有卸载一律禁止（优先于接管开关）；被拒绝的卸载由看板狗自动恢复",
+            checked = state.blockAll,
+            enabled = state.rootOk,
+            onChange = vm::toggleBlockAll
+        )
+        ToggleRow(
+            title = "接管系统卸载",
+            subtitle = "单次单个应用卸载 → 弹窗确认，允许则放行；60 秒内 ≥3 次尝试（频繁/批量）→ 自动禁止；熄屏自动拒绝",
+            checked = state.takeover,
+            enabled = state.rootOk,
+            onChange = vm::toggleTakeover
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("自动拦截审计日志", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = vm::clearGuardEvents) { Text("清空") }
+        }
+        if (events.isEmpty()) {
+            Text(
+                "暂无拦截记录（自动禁止/自动恢复事件将在此记录）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Text(
+                events.takeLast(40).reversed().joinToString("\n") { it.formatted },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                modifier = Modifier.horizontalScroll(rememberScrollState())
+            )
         }
     }
 }
 
-// ---------------- 卸载守卫 ----------------
+// ---------------- APK 安装器 ----------------
 
 @Composable
-private fun UninstallGuardCard(state: UiState, vm: MainViewModel) {
-    SectionCard("卸载守卫（所有卸载须经同意）") {
-        ToggleRow(
-            title = "卸载确认拦截",
-            subtitle = "亮屏：弹窗询问后放行/拒绝；熄屏：自动拦截（拒绝请求/自动恢复）。" +
-                "adb/shell 卸载由 pm 包装器事前拦截；绕过 pm 的静默卸载由看板狗自动恢复" +
-                "（系统应用 install-existing，第三方从 APK 备份重装）",
-            checked = state.uninstallGuardPref,
-            enabled = state.rootOk,
-            onChange = vm::toggleUninstallGuard
-        )
+private fun InstallerCard(state: UiState, vm: MainViewModel) {
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.installApk(it) }
+    }
+    SectionCard("APK 安装器") {
         Text(
-            "需刷入 Magisk 模块（含 /system/bin/pm 包装器）并授权 Root；确认框 30 秒无响应按拒绝/自动恢复处理；" +
-                "绕过包装器的 adb 直连命令（cmd package）由看板狗事后恢复兜底",
+            "当前安装通道：${state.installChannel}（Root 静默 → 特权静默 → 系统确认，按可用性自动选择）",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Button(onClick = { picker.launch(arrayOf("application/vnd.android.package-archive")) }) {
+            Text("选择 APK 并安装")
+        }
+        Text(
+            "本应用已注册为 .apk 打开方式：在文件管理器打开 APK 时可选 SysKit 安装器（并可设为默认）。" +
+                "安装始终需要手动点击确认，外部传入的安装请求不会被静默代装。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+// ---------------- 内嵌 Magisk ----------------
+
+@Composable
+private fun EmbeddedMagiskCard(state: UiState, vm: MainViewModel) {
+    if (!state.magiskVisible) return // 已有 Magisk / Root / 配套模块部署 → 入口隐藏
+    SectionCard("内嵌 Magisk（Root 引导）") {
+        Text(
+            "未检测到 Magisk / Root。无 root 的设备上任何应用都无法给其他应用发放 su，" +
+                "Root 供给需经由 Magisk（boot 修补）。可一键安装内嵌的官方 Magisk 管理器" +
+                "（v31.1 · GPLv3 · 源码 github.com/topjohnwu/Magisk）：安装后在 Magisk 中" +
+                "「修补 boot 并刷入」获得 Root；此后 Root 授权与模块安装均由 Magisk 完成，本入口自动隐藏。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (!state.magiskAssetReady) {
+            Text(
+                "构建未内嵌 Magisk APK（构建时未联网或设置了 SYSKIT_SKIP_MAGISK=1）",
+                style = MaterialTheme.typography.bodySmall,
+                color = BadRed
+            )
+        }
+        Button(enabled = state.magiskAssetReady, onClick = vm::installMagiskManager) {
+            Text("安装 Magisk 管理器")
+        }
     }
 }
 
@@ -387,7 +418,7 @@ private fun LogsCard(logs: List<OpsLog.Line>, vm: MainViewModel) {
 private fun FooterCard(ctx: Context) {
     SectionCard("部署与说明") {
         Text(
-            "① Magisk 模块（推荐）：刷入 SysKit-MagiskModule.zip，自动以系统特权应用（/system/priv-app）方式挂载\n" +
+            "① Magisk 模块（推荐）：刷入 SysKit-MagiskModule.zip，自动以系统特权应用（/system/priv-app）+ pm 卸载管控包装器方式挂载\n" +
                 "② 直接写入系统分区：adb push 至 /system/priv-app/SysKit/ 并部署 privapp-permissions 白名单（详见 README）\n" +
                 "③ 临时授权（无需 root / 系统应用）：执行下方命令，开放基础功能",
             style = MaterialTheme.typography.bodySmall,
@@ -399,12 +430,13 @@ private fun FooterCard(ctx: Context) {
             ctx = ctx
         )
         Text(
-            "安全提示：固化/无线 ADB 会扩大调试面，请仅在可信环境使用；本应用不申请网络权限。",
+            "安全提示：固化/无线 ADB 会扩大调试面，请仅在可信环境使用；本应用不申请网络权限。" +
+                "禁止系统卸载/接管系统卸载需 Root 与 Magisk 模块（pm 包装器）配合。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "SysKit v1.1.0 · minSdk 26 (Android 8.0)",
+            "SysKit v1.2.0 · minSdk 26 (Android 8.0)",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

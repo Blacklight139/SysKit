@@ -7,5 +7,7 @@
 <permissions>
     <privapp-permissions package="com.syskit.tools">
         <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
+        <!-- APK 安装器：特权静默安装通道（priv-app 持有即免系统确认弹窗） -->
+        <permission name="android.permission.INSTALL_PACKAGES"/>
     </privapp-permissions>
 </permissions>

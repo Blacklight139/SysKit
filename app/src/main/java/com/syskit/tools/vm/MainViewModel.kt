@@ -1,12 +1,16 @@
 package com.syskit.tools.vm
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.syskit.tools.log.GuardEventLog
 import com.syskit.tools.log.OpsLog
+import com.syskit.tools.ops.ApkInstaller
 import com.syskit.tools.ops.DeviceOwnerOps
-import com.syskit.tools.ops.StoreGuard
+import com.syskit.tools.ops.EmbeddedMagisk
 import com.syskit.tools.ops.SystemOps
+import com.syskit.tools.ops.UninstallControl
 import com.syskit.tools.ops.UninstallGuard
 import com.syskit.tools.prefs.AppPrefs
 import com.syskit.tools.root.SuSession
@@ -18,7 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-data class StoreUi(val info: StoreGuard.StoreInfo, val guarded: Boolean?)
+/** magisk.db 授权记录（uid + 展示名 + policy） */
+data class SuPolicyUi(val uid: Int, val policy: Int, val label: String)
 
 data class UiState(
     val busy: String? = null,
@@ -39,11 +44,16 @@ data class UiState(
     // 用户开关（持久化）
     val adbLock: Boolean = false,
     val devOptionsPref: Boolean = false,
-    val storeGuardPref: Boolean = false,
     val tcpAdbPref: Boolean = false,
-    val uninstallGuardPref: Boolean = false,
-    // 商店
-    val stores: List<StoreUi> = emptyList(),
+    // 卸载管控
+    val blockAll: Boolean = false,
+    val takeover: Boolean = false,
+    val installChannel: String = "",
+    // 内嵌 Magisk
+    val magiskVisible: Boolean = false,
+    val magiskAssetReady: Boolean = false,
+    // Root 授权管理
+    val suPolicies: List<SuPolicyUi> = emptyList(),
     val toast: String? = null,
 )
 
@@ -73,21 +83,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         OpsLog.clear()
     }
 
+    fun clearGuardEvents() {
+        GuardEventLog.clear()
+    }
+
     fun refresh() {
         viewModelScope.launch(Dispatchers.IO) {
             val ctx = getApplication<Application>()
             val s = su?.takeIf { it.isAlive }
-            val stores = StoreGuard.detectInstalled(ctx, prefs.customStores).map { info ->
-                StoreUi(info, s?.let { StoreGuard.queryGuarded(it, info.pkg) })
-            }
+            val rootOk = s != null
+            val priv = SystemOps.isPrivApp(ctx)
+            val magiskInstalled = EmbeddedMagisk.magiskInstalled(ctx)
+            val showMagisk = EmbeddedMagisk.shouldShowEmbedded(magiskInstalled, rootOk, priv)
+            val policies = s?.let { loadSuPolicies(it) } ?: emptyList()
             _state.update {
                 it.copy(
                     isSystemApp = SystemOps.isSystemApp(ctx),
-                    isPrivApp = SystemOps.isPrivApp(ctx),
+                    isPrivApp = priv,
                     hasWss = SystemOps.hasWriteSecureSettings(ctx),
                     installPath = SystemOps.installPath(ctx),
-                    rootChecked = (s != null) || it.rootChecked,
-                    rootOk = s != null,
+                    rootChecked = rootOk || it.rootChecked,
+                    rootOk = rootOk,
                     rootInfo = it.rootInfo.ifBlank { s?.exec("id")?.output ?: "" },
                     adbEnabled = SystemOps.getAdbEnabled(ctx),
                     devOptionsEnabled = SystemOps.getDevOptionsEnabled(ctx),
@@ -95,10 +111,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     isDeviceOwner = DeviceOwnerOps.isDeviceOwner(ctx),
                     adbLock = prefs.adbLock,
                     devOptionsPref = prefs.devOptions,
-                    storeGuardPref = prefs.storeGuard,
                     tcpAdbPref = prefs.tcpAdb,
-                    uninstallGuardPref = prefs.uninstallGuard,
-                    stores = stores,
+                    blockAll = prefs.blockAll,
+                    takeover = prefs.takeover,
+                    installChannel = ApkInstaller.label(
+                        ApkInstaller.choosePath(rootOk, ApkInstaller.hasInstallPackages(ctx))
+                    ),
+                    magiskVisible = showMagisk,
+                    magiskAssetReady = showMagisk && EmbeddedMagisk.hasEmbeddedAsset(ctx),
+                    suPolicies = policies,
                 )
             }
         }
@@ -135,7 +156,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Root ----------
 
-    /** 请求 root；成功后若商店守卫已开启 → 立即禁用商店卸载能力（核心需求） */
+    /** 请求 root；成功后若卸载管控已开启 → 立即激活看板狗 */
     fun requestRoot() {
         viewModelScope.launch(Dispatchers.IO) {
             _state.update { it.copy(busy = "等待 Magisk 授权…") }
@@ -151,17 +172,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val magisk = s.exec("magisk -v")?.output?.lineSequence()?.firstOrNull().orEmpty()
             OpsLog.log("Root 授权成功：$id${if (magisk.isNotBlank()) " · $magisk" else ""}")
             _state.update { it.copy(busy = null, rootChecked = true, rootOk = true, rootInfo = id, toast = "Root 授权成功") }
-            if (prefs.storeGuard) {
-                OpsLog.log("已获取 Root 且商店守卫开启 → 立即禁用应用商店卸载能力")
-                applyStoreGuardInternal()
-            }
-            if (prefs.uninstallGuard) {
+            if (UninstallControl.modeOf(prefs.blockAll, prefs.takeover) != UninstallControl.Mode.OFF) {
                 val ctx = getApplication<Application>()
                 UninstallGuard.ensureDirs(s)
                 UninstallGuard.setGuardState(s, true)
                 UninstallGuard.grantSaw(s, ctx.packageName)
                 UninstallGuardService.start(ctx)
-                OpsLog.log("已获取 Root 且卸载守卫开启 → 看板狗已激活")
+                OpsLog.log("已获取 Root 且卸载管控开启 → 看板狗已激活")
             }
             refresh()
         }
@@ -259,149 +276,155 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---------- 商店守卫 ----------
+    // ---------- 卸载管控 ----------
 
-    fun toggleStoreGuard(on: Boolean) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (!on) {
-                prefs.storeGuard = false
-                OpsLog.log("商店守卫：已停用（已禁用的商店不会自动恢复，可手动“恢复”）")
-                _state.update { it.copy(toast = "商店守卫已停用") }
-                refresh()
-                return@launch
-            }
-            prefs.storeGuard = true
-            val s = suOrAcquire(30_000)
-            if (s == null) {
-                OpsLog.log("商店守卫：已登记，待获取 Root 后立即执行")
-                _state.update { it.copy(toast = "已登记，待获取 Root 后立即执行") }
-                refresh()
-                return@launch
-            }
-            applyStoreGuardInternal()
-        }
+    fun toggleBlockAll(on: Boolean) {
+        prefs.blockAll = on
+        OpsLog.log(if (on) "卸载管控：禁止系统卸载 已开启（所有卸载一律拒绝）" else "卸载管控：禁止系统卸载 已关闭")
+        applyControl()
     }
 
-    /** 手动触发：立即禁用 */
-    fun applyStoreGuardNow() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val s = suOrAcquire(30_000)
-            if (s == null) {
-                _state.update { it.copy(toast = "需要 Root 权限") }
-                return@launch
-            }
-            applyStoreGuardInternal()
-        }
+    fun toggleTakeover(on: Boolean) {
+        prefs.takeover = on
+        OpsLog.log(if (on) "卸载管控：接管系统卸载 已开启（单次弹窗确认，频繁/批量自动禁止）" else "卸载管控：接管系统卸载 已关闭")
+        applyControl()
     }
 
-    private fun applyStoreGuardInternal() {
-        val ctx = getApplication<Application>()
-        val s = su ?: return
-        _state.update { it.copy(busy = "正在禁用应用商店卸载能力…") }
-        val stores = StoreGuard.detectInstalled(ctx, prefs.customStores)
-        if (stores.isEmpty()) OpsLog.log("商店守卫：未检测到任何应用商店")
-        val results = stores.associate { st -> st.pkg to StoreGuard.applyTo(s, st.pkg) }
-        var allOk = true
-        results.forEach { (pkg, rs) ->
-            val st = stores.first { it.pkg == pkg }
-            val g = StoreGuard.guarded(rs)
-            if (!g) allOk = false
-            OpsLog.log("商店守卫 [${st.label}]：${if (g) "卸载能力已禁用" else "未能禁用（见明细）"}")
-            rs.filter { !it.ok }.forEach { OpsLog.log("  ↳ ${it.cmd} → ${it.output}") }
-        }
-        if (DeviceOwnerOps.isDeviceOwner(ctx)) {
-            DeviceOwnerOps.setUninstallBlocked(ctx, ctx.packageName, true)
-        }
-        _state.update { st ->
-            st.copy(
-                busy = null,
-                stores = st.stores.map { sui ->
-                    sui.copy(guarded = results[sui.info.pkg]?.let { StoreGuard.guarded(it) } ?: sui.guarded)
-                },
-                toast = if (allOk) "应用商店卸载能力已禁用" else "部分商店未完全禁用，详见日志"
-            )
-        }
-        refresh()
-    }
-
-    fun restoreStore(pkg: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val s = suOrAcquire(30_000)
-            if (s == null) {
-                _state.update { it.copy(toast = "需要 Root 权限") }
-                return@launch
-            }
-            val rs = StoreGuard.restoreTo(s, pkg)
-            val anyOk = rs.any { it.ok }
-            OpsLog.log("恢复 [$pkg]：${if (anyOk) "已恢复卸载能力" else "恢复失败"}")
-            rs.filter { !it.ok }.forEach { OpsLog.log("  ↳ ${it.cmd} → ${it.output}") }
-            _state.update { st ->
-                st.copy(
-                    toast = if (anyOk) "已恢复 $pkg 的卸载能力" else "恢复失败，详见日志",
-                    stores = st.stores.map { if (it.info.pkg == pkg) it.copy(guarded = false) else it }
-                )
-            }
-            refresh()
-        }
-    }
-
-    fun addCustomStore(pkg: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (!pkg.contains('.')) {
-                _state.update { it.copy(toast = "包名格式不正确") }
-                return@launch
-            }
-            prefs.customStores = prefs.customStores + pkg
-            OpsLog.log("已添加自定义守卫目标：$pkg")
-            refresh()
-            if (prefs.storeGuard) applyStoreGuardNow()
-        }
-    }
-
-    fun removeCustomStore(pkg: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            prefs.customStores = prefs.customStores - pkg
-            OpsLog.log("已移除自定义守卫目标：$pkg")
-            refresh()
-        }
-    }
-
-    // ---------- 卸载守卫 ----------
-
-    /** 开启需 Root（文件协议 + 备份/恢复均经 root 会话）；关闭即时生效 */
-    fun toggleUninstallGuard(on: Boolean) {
+    private fun applyControl() {
         viewModelScope.launch(Dispatchers.IO) {
             val ctx = getApplication<Application>()
-            if (!on) {
+            val mode = UninstallControl.modeOf(prefs.blockAll, prefs.takeover)
+            if (mode == UninstallControl.Mode.OFF) {
                 val s = suOrAcquire(15_000)
                 if (s != null) UninstallGuard.setGuardState(s, false)
-                prefs.uninstallGuard = false
                 UninstallGuardService.stop(ctx)
-                OpsLog.log("卸载守卫：已停用（shell 卸载恢复直通；已有备份保留在 ${UninstallGuard.BACKUP_DIR}）")
-                _state.update { it.copy(toast = "卸载守卫已停用") }
+                _state.update { it.copy(toast = "卸载管控已停用（pm 包装器恢复透传）") }
                 refresh()
                 return@launch
             }
-            _state.update { it.copy(busy = "正在启用卸载守卫…") }
+            _state.update { it.copy(busy = "正在应用卸载管控…") }
             val s = suOrAcquire(30_000)
             if (s == null) {
-                _state.update { it.copy(busy = null, toast = "卸载守卫需要 Root 权限") }
+                _state.update { it.copy(busy = null, toast = "卸载管控需要 Root 权限") }
                 refresh()
                 return@launch
             }
-            val ready = UninstallGuard.ensureDirs(s) && UninstallGuard.setGuardState(s, true)
+            val ok = UninstallGuard.ensureDirs(s) && UninstallGuard.setGuardState(s, true)
             UninstallGuard.grantSaw(s, ctx.packageName)
-            if (!ready) {
-                OpsLog.log("卸载守卫：守卫目录初始化失败（详见日志）")
-                _state.update { it.copy(busy = null, toast = "启用失败，详见日志") }
-                refresh()
+            if (ok) {
+                UninstallGuardService.start(ctx)
+                _state.update {
+                    it.copy(
+                        busy = null,
+                        toast = "卸载管控已应用：" +
+                            if (mode == UninstallControl.Mode.BLOCK_ALL) "禁止系统卸载" else "接管系统卸载"
+                    )
+                }
+            } else {
+                _state.update { it.copy(busy = null, toast = "应用失败，详见日志") }
+            }
+            refresh()
+        }
+    }
+
+    // ---------- APK 安装器 ----------
+
+    fun installApk(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val s = su?.takeIf { it.isAlive }
+            val path = ApkInstaller.choosePath(s != null, ApkInstaller.hasInstallPackages(ctx))
+            OpsLog.log("安装器：开始安装（通道=${ApkInstaller.label(path)}）")
+            _state.update { it.copy(busy = "正在安装…（通道=${ApkInstaller.label(path)}）") }
+            ApkInstaller.install(ctx, uri, path) { ok, msg ->
+                OpsLog.log("安装器：$msg")
+                _state.update { it.copy(busy = null, toast = msg) }
+            }
+            refresh()
+        }
+    }
+
+    // ---------- 内嵌 Magisk ----------
+
+    fun installMagiskManager() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            if (!EmbeddedMagisk.hasEmbeddedAsset(ctx)) {
+                _state.update { it.copy(toast = "构建未内嵌 Magisk APK（SYSKIT_SKIP_MAGISK=1）") }
                 return@launch
             }
-            prefs.uninstallGuard = true
-            UninstallGuardService.start(ctx)
-            OpsLog.log("卸载守卫：已启用（亮屏弹窗确认 / 熄屏自动拦截；看板狗启动后将全量备份 /data/app APK）")
-            _state.update { it.copy(busy = null, toast = "卸载守卫已启用") }
+            val f = EmbeddedMagisk.extractAssetApk(ctx, "magisk_install.apk")
+            if (f == null) {
+                _state.update { it.copy(toast = "内嵌资源提取失败") }
+                return@launch
+            }
+            val s = su?.takeIf { it.isAlive }
+            val path = ApkInstaller.choosePath(s != null, ApkInstaller.hasInstallPackages(ctx))
+            _state.update { it.copy(busy = "正在安装 Magisk 管理器…（通道=${ApkInstaller.label(path)}）") }
+            ApkInstaller.installFile(ctx, f, path) { ok, msg ->
+                OpsLog.log("内嵌 Magisk：$msg")
+                _state.update {
+                    it.copy(
+                        busy = null,
+                        toast = if (ok) "$msg；打开 Magisk 后「修补 boot 并刷入」即可获得 Root" else msg
+                    )
+                }
+                refresh()
+            }
+        }
+    }
+
+    fun openMagisk() {
+        val ctx = getApplication<Application>()
+        if (!EmbeddedMagisk.launchMagisk(ctx)) {
+            _state.update { it.copy(toast = "未找到 Magisk 管理器") }
+        }
+    }
+
+    // ---------- Root 授权管理（magisk.db，root 可用时；实验性） ----------
+
+    /** Magisk magisk.db policy 约定：2=允许，0=拒绝；写操作为实验性，精确控制请用 Magisk App */
+    fun setSuPolicy(uid: Int, allow: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val s = suOrAcquire(30_000)
+            if (s == null) {
+                _state.update { it.copy(toast = "需要 Root 权限") }
+                return@launch
+            }
+            val policy = if (allow) 2 else 0
+            val r = s.exec(
+                "magisk --sqlite \"REPLACE INTO policies (uid, policy, until, notify) VALUES($uid, $policy, 0, 1)\""
+            )
+            val ok = r?.ok == true
+            OpsLog.log("Root 授权：uid $uid → ${if (allow) "允许" else "拒绝"}${if (ok) "" else "（失败：${r?.output}）"}")
+            _state.update {
+                it.copy(toast = if (ok) "已${if (allow) "允许" else "拒绝"} uid $uid 的 root 授权" else "设置失败，详见日志")
+            }
             refresh()
+        }
+    }
+
+    fun clearSuPolicy(uid: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val s = suOrAcquire(30_000)
+            if (s == null) {
+                _state.update { it.copy(toast = "需要 Root 权限") }
+                return@launch
+            }
+            val ok = s.exec("magisk --sqlite \"DELETE FROM policies WHERE uid=$uid\"")?.ok == true
+            OpsLog.log("Root 授权：uid $uid 记录${if (ok) "已清除（恢复询问）" else "清除失败"}")
+            _state.update { it.copy(toast = if (ok) "已清除 uid $uid 授权记录（恢复询问）" else "清除失败") }
+            refresh()
+        }
+    }
+
+    private fun loadSuPolicies(s: SuSession): List<SuPolicyUi> {
+        val r = s.exec("magisk --sqlite \"SELECT uid, policy, until FROM policies\"") ?: return emptyList()
+        if (!r.ok) return emptyList()
+        val ctx = getApplication<Application>()
+        return EmbeddedMagisk.parsePolicies(r.output).map { row ->
+            val name = runCatching { ctx.packageManager.getNameForUid(row.uid) }.getOrNull()
+            SuPolicyUi(row.uid, row.policy, name?.substringAfterLast(':')?.takeIf { it.isNotBlank() } ?: "uid ${row.uid}")
         }
     }
 

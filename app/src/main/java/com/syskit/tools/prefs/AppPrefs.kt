@@ -19,32 +19,26 @@ class AppPrefs(context: Context) {
         get() = sp.getBoolean(K_DEV_OPTIONS, false)
         set(v) = sp.edit().putBoolean(K_DEV_OPTIONS, v).apply()
 
-    /** 禁用应用商店卸载能力（获得 root 后立即执行 + 开机重应用） */
-    var storeGuard: Boolean
-        get() = sp.getBoolean(K_STORE_GUARD, false)
-        set(v) = sp.edit().putBoolean(K_STORE_GUARD, v).apply()
+    /** 禁止系统卸载：开启后所有卸载一律拒绝（优先于接管开关） */
+    var blockAll: Boolean
+        get() = sp.getBoolean(K_UNINSTALL_BLOCK_ALL, false)
+        set(v) = sp.edit().putBoolean(K_UNINSTALL_BLOCK_ALL, v).apply()
 
-    /** 卸载守卫：所有卸载须经确认（亮屏弹窗 / 熄屏自动拦截 + 开机自启看板狗） */
-    var uninstallGuard: Boolean
-        get() = sp.getBoolean(K_UNINSTALL_GUARD, false)
-        set(v) = sp.edit().putBoolean(K_UNINSTALL_GUARD, v).apply()
+    /** 接管系统卸载：单次单个应用弹窗确认；频繁/批量自动禁止并独立记录 */
+    var takeover: Boolean
+        get() = sp.getBoolean(K_UNINSTALL_TAKEOVER, false)
+        set(v) = sp.edit().putBoolean(K_UNINSTALL_TAKEOVER, v).apply()
 
     /** 无线 ADB（TCP 5555） */
     var tcpAdb: Boolean
         get() = sp.getBoolean(K_TCP_ADB, false)
         set(v) = sp.edit().putBoolean(K_TCP_ADB, v).apply()
 
-    /** 用户自定义需要守卫的商店包名 */
-    var customStores: Set<String>
-        get() = sp.getStringSet(K_CUSTOM_STORES, emptySet()) ?: emptySet()
-        set(v) = sp.edit().putStringSet(K_CUSTOM_STORES, v).apply()
-
     private companion object {
         const val K_ADB_LOCK = "adb_lock"
         const val K_DEV_OPTIONS = "dev_options"
-        const val K_STORE_GUARD = "store_guard"
-        const val K_UNINSTALL_GUARD = "uninstall_guard"
+        const val K_UNINSTALL_BLOCK_ALL = "uninstall_block_all"
+        const val K_UNINSTALL_TAKEOVER = "uninstall_takeover"
         const val K_TCP_ADB = "tcp_adb"
-        const val K_CUSTOM_STORES = "custom_stores"
     }
 }

@@ -5,9 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.syskit.tools.log.OpsLog
 import com.syskit.tools.ops.DeviceOwnerOps
-import com.syskit.tools.ops.StoreGuard
 import com.syskit.tools.ops.SystemOps
-import com.syskit.tools.ops.UninstallGuard
 import com.syskit.tools.prefs.AppPrefs
 import com.syskit.tools.root.SuSession
 import com.syskit.tools.service.UninstallGuardService
@@ -17,17 +15,17 @@ import com.syskit.tools.service.UninstallGuardService
  *
  * - L1/L2（WRITE_SECURE_SETTINGS）路径无需 root 即可重应用 ADB / 开发者选项
  * - L3（root）路径静默尝试（Magisk 已记住授权则自动成功，否则跳过并记录）
- * - 设备所有者状态下重新封死自身卸载
+ * - 卸载管控开启时启动看板狗（服务自行重建 guard_state 与 root 会话）
  */
 class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val prefs = AppPrefs(context)
-        if (!prefs.adbLock && !prefs.devOptions && !prefs.storeGuard && !prefs.uninstallGuard) return
+        if (!prefs.adbLock && !prefs.devOptions && !prefs.blockAll && !prefs.takeover) return
 
-        // 卸载守卫：开机即启动看板狗（无需 root；root 会话由服务自行静默获取）
-        if (prefs.uninstallGuard) {
+        // 卸载管控：开机即启动看板狗（无需 root；root 会话与 guard_state 由服务自行恢复）
+        if (prefs.blockAll || prefs.takeover) {
             runCatching { UninstallGuardService.start(context) }
         }
 
@@ -55,20 +53,6 @@ class BootReceiver : BroadcastReceiver() {
                     if (prefs.devOptions) {
                         SystemOps.setDevOptionsEnabledRoot(su, true)
                         OpsLog.log("开机：开发者选项已保持开启")
-                    }
-                    if (prefs.storeGuard) {
-                        StoreGuard.detectInstalled(context, prefs.customStores).forEach { st ->
-                            val results = StoreGuard.applyTo(su, st.pkg)
-                            OpsLog.log(
-                                "开机：商店守卫 [${st.label}] " +
-                                    if (StoreGuard.guarded(results)) "已重应用" else "重应用失败"
-                            )
-                        }
-                    }
-                    if (prefs.uninstallGuard) {
-                        UninstallGuard.ensureDirs(su)
-                        UninstallGuard.setGuardState(su, true)
-                        OpsLog.log("开机：卸载守卫状态文件已重应用（pm 包装器恢复拦截）")
                     }
                 } else {
                     OpsLog.log("开机：无可用 root（未记住授权？），部分配置未重应用")
