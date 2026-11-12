@@ -1,14 +1,12 @@
 #!/system/bin/sh
 # SysKit 卸载守卫 —— pm 命令包装器（由 Magisk 模块挂载到 /system/bin/pm）
 #
-# 所有卸载必须经 SysKit 管控：接管模式（guard_state=1）亮屏弹窗询问、熄屏自动拦截；
-# 禁止模式（guard_state=2）一律拒绝。
+# 所有卸载必须经 SysKit 确认：亮屏弹窗询问，熄屏自动拦截。
 #   - 仅拦截 uninstall / uninstall-existing 子命令；其余子命令零改动透传
-#   - 守卫关闭（guard_state != 1/2）时，卸载命令也直接透传
-#   - 接管模式：写 req 文件 → 拉起 SysKit 确认对话框 → 轮询 resp
+#   - 守卫未开启（guard_state != 1）时，卸载命令也直接透传
+#   - 拦截：写 req 文件 → 拉起 SysKit 确认对话框 → 轮询 resp
 #     ALLOW → 放行执行原命令；DENY / 超时（SYSKIT_TIMEOUT_SECS，默认30s）→ 拒绝退出 1
 #     App 无响应（未装/被卸载/会话丢失）超时视为拒绝（fail-closed）
-#   - 禁止模式：立即拒绝，不产生请求文件
 #
 # 环境变量 SYSKIT_DIR / SYSKIT_TIMEOUT_SECS / SYSKIT_PM_CMD 仅用于主机端测试。
 # 说明：adb 级用户本就可直接执行任意命令，环境变量覆盖不构成额外提权面。
@@ -31,13 +29,10 @@ case "$1" in
   *) run_original "$@" ;;
 esac
 
-# 守卫状态：0 关闭（透传）/ 1 接管（弹窗确认）/ 2 禁止（一律拒绝）
-GUARD=$(cat "$SYSKIT_DIR/guard_state" 2>/dev/null)
-if [ "$GUARD" = "2" ]; then
-  echo "SysKit 卸载拦截：已拒绝卸载（禁止系统卸载已开启）"
-  exit 1
+# 守卫未开启：透传
+if [ "$(cat "$SYSKIT_DIR/guard_state" 2>/dev/null)" != "1" ]; then
+  run_original "$@"
 fi
-[ "$GUARD" = "1" ] || run_original "$@"
 
 # 解析目标包名（跳过 --user / --volume 的取值参数）
 SUBCMD="$1"

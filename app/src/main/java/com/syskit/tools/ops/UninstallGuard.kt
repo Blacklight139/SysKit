@@ -25,16 +25,6 @@ object UninstallGuard {
     /** 包装器授权后短期内到达的 REMOVED 广播视为用户已同意，避免二次拦截 */
     const val ALLOW_WINDOW_MS = 15_000L
 
-    /** guard_state 取值：0 关闭（透传）/ 1 接管（弹窗确认）/ 2 禁止（一律拒绝） */
-    const val GUARD_MODE_OFF = 0
-    const val GUARD_MODE_ASK = 1
-    const val GUARD_MODE_DENY_ALL = 2
-
-    /** 批量保护：时间窗内卸载尝试次数阈值 / 窗口时长 / 触发后冷却期 */
-    const val BULK_LIMIT = 3
-    const val BULK_WINDOW_MS = 60_000L
-    const val BULK_COOLDOWN_MS = 10 * 60_000L
-
     private val PKG_RE = Regex("^[a-zA-Z0-9._]{1,200}$")
     private val ID_RE = Regex("^[0-9_]{1,32}$")
 
@@ -159,16 +149,9 @@ object UninstallGuard {
         return true
     }
 
-    /** guard_state 写入命令（0 关闭 / 1 接管弹窗 / 2 禁止一切卸载） */
-    fun guardStateCmd(mode: Int): String? =
-        if (mode == GUARD_MODE_OFF || mode == GUARD_MODE_ASK || mode == GUARD_MODE_DENY_ALL)
-            "printf $mode > $GUARD_STATE_FILE"
-        else null
-
-    /** 写 guard_state（包装器据此决定透传 / 弹窗 / 拒绝） */
-    fun setGuardState(su: SuSession, mode: Int): Boolean {
-        val cmd = guardStateCmd(mode) ?: return false
-        val r = su.exec(cmd)
+    /** 写 guard_state（包装器据此决定拦截或透传） */
+    fun setGuardState(su: SuSession, on: Boolean): Boolean {
+        val r = su.exec("printf ${if (on) 1 else 0} > $GUARD_STATE_FILE")
         if (r?.ok != true) OpsLog.log("卸载守卫：写入 guard_state 失败")
         return r?.ok == true
     }
@@ -180,35 +163,6 @@ object UninstallGuard {
         su.exec("pm grant $selfPkg android.permission.POST_NOTIFICATIONS")
         return ok
     }
-
-    // ---------- 批量保护（接管模式：频繁/一次性大量卸载自动禁止） ----------
-
-    private val attempts = ArrayDeque<Long>()
-
-    @Volatile
-    private var bulkUntil = 0L
-
-    /** 记录一次卸载尝试；返回 true 表示本次触发了批量保护（进入冷却期） */
-    fun recordAttempt(now: Long): Boolean {
-        synchronized(attempts) {
-            if (now < bulkUntil) return false
-            attempts.addLast(now)
-            while (attempts.size > 32) attempts.removeFirst()
-            val recent = attempts.count { it >= now - BULK_WINDOW_MS }
-            if (recent >= BULK_LIMIT) {
-                bulkUntil = now + BULK_COOLDOWN_MS
-                attempts.clear()
-                return true
-            }
-            return false
-        }
-    }
-
-    /** 是否处于批量保护冷却期（期间所有卸载自动禁止） */
-    fun isBulkBlocked(now: Long): Boolean = synchronized(attempts) { now < bulkUntil }
-
-    /** 清空批量保护状态（模式切换/服务重启时调用） */
-    fun resetBulk() = synchronized(attempts) { attempts.clear(); bulkUntil = 0L }
 
     // ---------- 最近授权状态（进程内存；服务重启即失效，属可接受降级） ----------
 
