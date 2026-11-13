@@ -38,6 +38,11 @@ tools/build_all.sh
 
 产物：`dist/SysKit-v<版本>.apk`、`dist/SysKit-MagiskModule-v<版本>.zip`
 
+> **签名密钥持久化**：`syskit-release.jks.b64` 是签名密钥的唯一事实来源（base64 编码、口令保护）。
+> 构建脚本每次从该文件恢复 `syskit-release.jks`，保证跨环境/跨会话构建签名一致（升级不冲突）。
+> 该文件已提交至本私有仓库（口令 `syskit123456` 仅对持有仓库权限者构成保护）。
+> **安全提示**：自签名密钥入私有仓库便于个人部署，但并非高安全做法；正式出厂/刷机包部署请改用平台签名（platform key）并离线保管。
+
 > 首次构建自动生成自签名密钥（口令 `syskit123456`，可用环境变量 `SYSKIT_STORE_PASS` 等覆盖）。
 > **正式出厂/刷机包部署**：请替换为你自己的签名，或直接使用平台签名（platform key），并保持签名固定以便升级。
 

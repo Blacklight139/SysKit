@@ -6,13 +6,19 @@ cd "$(dirname "$0")/.."
 VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
 VERSION_CODE=$(grep -oP 'versionCode\s*=\s*\K\d+' app/build.gradle.kts)
 KEYSTORE=syskit-release.jks
+KEYSTORE_B64=syskit-release.jks.b64
 
-# 1) 签名密钥（正式出厂部署建议改用平台签名，替换本密钥并重新签名）
-if [ ! -f "$KEYSTORE" ]; then
+# 1) 签名密钥持久化：syskit-release.jks.b64 为唯一事实来源（跨环境/跨会话恢复，保证签名一致）。
+#    正式出厂部署建议改用平台签名，替换本密钥并重新签名。
+if [ -f "$KEYSTORE_B64" ]; then
+  base64 -d "$KEYSTORE_B64" > "$KEYSTORE"
+  echo "[*] 签名密钥已从 $KEYSTORE_B64 恢复（签名保持一致）"
+elif [ ! -f "$KEYSTORE" ]; then
   echo "[*] 生成自签名密钥 $KEYSTORE（口令 syskit123456，可经环境变量覆盖）"
   keytool -genkeypair -v -keystore "$KEYSTORE" -alias syskit -keyalg RSA -keysize 2048 \
     -validity 10950 -storepass syskit123456 -keypass syskit123456 \
     -dname "CN=SysKit, OU=Tools, O=SysKit, L=Local, ST=Local, C=CN" >/dev/null 2>&1
+  echo "[!] 注意：请将新密钥更新到 $KEYSTORE_B64（base64 内容）以持久化，否则下次构建将产生不同签名"
 fi
 
 # 1.5) 内嵌 Magisk（锁定版本 + SHA256 校验；SYSKIT_SKIP_MAGISK=1 可跳过，APK 内入口将显示“未内嵌”）
